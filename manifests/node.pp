@@ -1,41 +1,117 @@
+# == Class: openshift_origin::node
+#
+# Manage an OpenShift Origin node.
+#
+# === Parameters
+#
+# None
+#
+# === Examples
+#
+#  include openshift_origin::node
+#
+# === Copyright
+#
 # Copyright 2013 Mojo Lingo LLC.
-# Modifications by Red Hat, Inc.
-# 
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-# 
-#      http://www.apache.org/licenses/LICENSE-2.0
-# 
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Copyright 2013 Red Hat, Inc.
+#
+# === License
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
 class openshift_origin::node {
   include openshift_origin::params
-  class { 'openshift_origin::modprobe': }
-
-  ensure_resource('package', [
-      'rubygem-openshift-origin-node',
-      "${::openshift_origin::params::ruby_scl_prefix}rubygem-passenger-native",
-      'openshift-origin-node-util',
-      'policycoreutils-python',
-      'openshift-origin-msg-node-mcollective',
-      'git',
-      'make',
-      'oddjob',
-      'vim-enhanced',
-    ], {
+  ensure_resource('package', 'rubygem-openshift-origin-node', {
       ensure  => present,
-      require => Class['openshift_origin::install_method'],
     }
   )
-  
-  include openshift_origin::cartridges
-  include openshift_origin::mcollective_server  
-  
+
+  ensure_resource('package', 'openshift-origin-node-util', {
+      ensure  => present,
+    }
+  )
+
+  ensure_resource('package', 'pam_openshift', {
+      ensure  => present,
+    }
+  )
+
+  ensure_resource('package', 'openshift-origin-node-proxy', {
+      ensure  => present,
+    }
+  )
+
+  ensure_resource('package', 'openshift-origin-port-proxy', {
+      ensure  => present,
+    }
+  )
+
+  ensure_resource('package', 'openshift-origin-msg-node-mcollective', {
+      ensure  => present,
+    }
+  )
+
+  ensure_resource('package', 'git', {
+      ensure => present
+    }
+  )
+  ensure_resource('package', 'make', {
+      ensure => present
+    }
+  )
+  ensure_resource('package', 'cronie', {
+      ensure => present
+    }
+  )
+  ensure_resource('package', 'oddjob', {
+      ensure => present
+    }
+  )
+
+  if $::openshift_origin::configure_firewall == true {
+    $webproxy_http_port = $::use_firewalld ? {
+      'true'  => '8000/tcp',
+      default => '8000:tcp',
+    }
+
+    exec { 'Open HTTP port for Node-webproxy':
+      command => "${openshift_origin::params::firewall_port_cmd}${webproxy_http_port}",
+      require => Package['firewall-package'],
+    }
+
+    $webproxy_https_port = $::use_firewalld ? {
+      'true'  => '8443/tcp',
+      default => '8443:tcp',
+    }
+
+    exec { 'Open HTTPS port for Node-webproxy':
+      command => "${openshift_origin::params::firewall_port_cmd}${webproxy_https_port}",
+      require => Package['firewall-package'],
+    }
+  } else {
+    warning 'Please ensure that ports 80, 443, 8000, 8443 are open for web requests'
+  }
+
+  file { 'node servername config':
+    ensure  => present,
+    path    => '/etc/httpd/conf.d/000001_openshift_origin_node_servername.conf',
+    content => template('openshift_origin/node/openshift-origin-node_servername.conf.erb'),
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => Package['rubygem-openshift-origin-node'],
+  }
+
   file { 'openshift node config':
     ensure  => present,
     path    => '/etc/openshift/node.conf',
@@ -45,106 +121,415 @@ class openshift_origin::node {
     group   => 'root',
     mode    => '0644',
   }
+
+  file { 'openshift node broker host env':
+    ensure  => present,
+    path    => '/etc/openshift/env/OPENSHIFT_BROKER_HOST',
+    content => $::openshift_origin::broker_fqdn,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => Package['rubygem-openshift-origin-node'],
+  }
+
+  file { 'openshift node cloud domain env':
+    ensure  => present,
+    path    => '/etc/openshift/env/OPENSHIFT_CLOUD_DOMAIN',
+    content => $::openshift_origin::cloud_domain,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => Package['rubygem-openshift-origin-node'],
+  }
+
+
+  augeas { 'update login.defs with min gear uid/gid':
+    context   => "/files/etc/login.defs",
+    changes   => [
+      "set /files/etc/login.defs/UID_MIN ${::openshift_origin::min_gear_uid}",
+      "set /files/etc/login.defs/GID_MIN ${::openshift_origin::min_gear_uid}",
+    ],
+    subscribe => File['openshift node config']
+  }
+
+  file { 'node sshd config':
+    ensure  => present,
+    path    => '/etc/ssh/sshd_config',
+    content => template('openshift_origin/node/sshd_config.erb'),
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0600',
+  }
+
+  if !defined(File['mcollective client config']) {
+    file { 'mcollective client config':
+      ensure  => present,
+      path    => '/etc/mcollective/client.cfg',
+      content => template('openshift_origin/mcollective-client.cfg.erb'),
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0644',
+      require => Package['mcollective'],
+    }
+  }
+
+  if !defined(File['mcollective server config']) {
+    file { 'mcollective server config':
+      ensure  => present,
+      path    => '/etc/mcollective/server.cfg',
+      content => template('openshift_origin/mcollective-server.cfg.erb'),
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0644',
+      require => Package['mcollective'],
+    }
+  }
+
+  if($::operatingsystem == 'Redhat' or $::operatingsystem == 'CentOS') {
+    if !defined(File['mcollective env']) {
+      file { 'mcollective env':
+        ensure  => present,
+        path    => '/etc/sysconfig/mcollective',
+        content => template('openshift_origin/rhel-scl-ruby193-env.erb'),
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0644',
+        require => Package['mcollective'],
+      }
+    }
+  }
+
+  if $::openshift_origin::configure_fs_quotas == true {
+    exec { 'Initialize quota DB':
+      command => '/usr/sbin/oo-init-quota',
+      creates => "${::gear_root_mount}/aquota.user",
+      require => Package['openshift-origin-node-util'],
+    }
+  } else {
+    warning 'Please ensure that quotas are enabled for /var/lib/openshift'
+  }
+
+  if $::openshift_origin::configure_fs_quotas == true {
+    if $::operatingsystem == "Fedora" {
+      if $::operatingsystemrelease == "18" {
+        file { 'quota enable service':
+          ensure  => present,
+          path    => '/usr/lib/systemd/system/openshift-quotaon.service',
+          content => template('openshift_origin/openshift-quotaon.service'),
+          owner   => 'root',
+          group   => 'root',
+          mode    => '0644',
+          require => [],
+        }
+        service { ['openshift-quotaon']:
+          require => [
+            File['quota enable service'],
+          ],
+          provider => 'systemd',
+          enable => true,
+        }
+      }
+    }
+  }
+
+  if $::openshift_origin::configure_cgroups == true {
+    if $::openshift_origin::enable_network_services == true {
+      service { [
+        'cgconfig',
+        'cgred',
+        'openshift-cgroups',
+        'openshift-port-proxy',
+      ]:
+        require => [
+          Package['rubygem-openshift-origin-node'],
+          Package['openshift-origin-node-util'],
+          Package['openshift-origin-node-proxy'],
+          Package['openshift-origin-port-proxy'],
+        ],
+        enable  => true,
+      }
+    } else {
+      warning 'Please ensure that cgconfig, cgred, openshift-port-proxy are running on all nodes'
+    }
+  } else {
+    warning 'CGroups disabled'
+  }
+
+  if $::openshift_origin::node_container == 'selinux' {
+
+    if $::openshift_origin::configure_pam == true {
+      augeas { 'openshift node pam sshd':
+        context => "/files/etc/pam.d/sshd",
+        changes => [
+        "set /files/etc/pam.d/sshd/#comment[.='pam_selinux.so close should be the first session rule'] 'pam_openshift.so close should be the first session rule'",
+            "ins 01 before *[argument='close']",
+            "set 01/type session",
+            "set 01/control required",
+            "set 01/module pam_openshift.so",
+            "set 01/argument close",
+            "set 01/#comment 'Managed by puppet:openshift_origin'",
     
-  # We combine these setsebool commands into a single semanage command
-  # because separate commands take a long time to run.
-  exec { 'node selinux booleans':
-    command  => template('openshift_origin/selinux/node.erb'),
-    provider => 'shell',
-    require  => [
-      Package['rubygem-openshift-origin-node'],
-      File['openshift node config'],
-    ]
-  }
-  
-  exec { 'Initialize quota DB':
-    command => '/usr/sbin/oo-init-quota',
-    require => Package['openshift-origin-node-util'],
-    unless  => '/usr/bin/quota -f /var/lib/openshift/ -q 2>/dev/null',
-  }
-  
-  augeas { 'Tune Sysctl knobs':
-    context => "/files/etc/sysctl.conf",
-    changes => [
-      # Increase kernel semaphores to accomodate many httpds.
-      "set kernel.sem '250  32000 32  4096'",
+            "set /files/etc/pam.d/sshd/#comment[.='pam_selinux.so open should only be followed by sessions to be executed in the user context'] 'pam_openshift.so open should only be followed by sessions to be executed in the user context'",
+            "ins 02 before *[argument='open']",
+            "set 02/type session",
+            "set 02/control required",
+            "set 02/module pam_openshift.so",
+            "set 02/argument[1] open",
+            "set 02/argument[2] env_params",
+            "set 02/#comment 'Managed by puppet:openshift_origin'",
+    
+            "rm *[module='pam_selinux.so']",
 
-      # Move ephemeral port range to accommodate app proxies.
-      "set net.ipv4.ip_local_port_range '15000 35530'",
+            "set 03/type session",
+            "set 03/control optional",
+            "set 03/module pam_cgroup.so",
+            "set 03/#comment 'Managed by puppet:openshift_origin'",
+    
+            "set 04/type session",
+            "set 04/control '[default=1 success=ignore]'",
+            "set 04/module pam_succeed_if.so",
+            "set 04/argument[1] 'quiet shell = /usr/bin/oo-trap-user'",
+            "set 04/#comment 'Managed by puppet:openshift_origin'",
 
-      # Increase the connection tracking table size.
-      "set net.netfilter.nf_conntrack_max 1048576",
-      
-      #IPTables port proxy
-      "set net.ipv4.ip_forward 1",
-      "set net.ipv4.conf.all.route_localnet 1",
-      
-      #Shared memory limits
-      "set kernel.shmall 4294967296",
-      "set kernel.shmmax 68719476736",
-      
-      #IPC Message queue limits
-      "set kernel.msgmnb 65536",
-      "set kernel.msgmax 65536",
-    ],
-    notify => Exec['Reload sysctl']
+            "set 05/type session",
+            "set 05/control required",
+            "set 05/module pam_namespace.so",
+            "set 05/argument[1] no_unmount_on_close",
+            "set 05/#comment 'Managed by puppet:openshift_origin'",
+    
+          ],
+          onlyif => "match *[#comment='Managed by puppet:openshift_origin'] size == 0"
+      }
+    
+      augeas { 'openshift node pam runuser':
+        context => "/files/etc/pam.d/runuser",
+        changes => [
+	
+            "set 01/type session",
+            "set 01/control '[default=1 success=ignore]'",
+            "set 01/module pam_succeed_if.so",
+            "set 01/argument[1] 'quiet shell = /usr/bin/oo-trap-user'",
+            "set 01/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 02/type session",
+            "set 02/control required",
+            "set 02/module pam_namespace.so",
+            "set 02/argument[1] no_unmount_on_close",
+            "set 02/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 03/type session",
+            "set 03/control optional",
+            "set 03/module pam_cgroup.so",
+            "set 03/#comment 'Managed by puppet:openshift_origin'",
+          ],
+          onlyif => "match *[#comment='Managed by puppet:openshift_origin'] size == 0"
+      }
+    
+      augeas { 'openshift node pam runuser-l':
+        context => "/files/etc/pam.d/runuser-l",
+        changes => [
+            "set 01/type session",
+            "set 01/control '[default=1 success=ignore]'",
+            "set 01/module pam_succeed_if.so",
+            "set 01/argument[1] 'quiet shell = /usr/bin/oo-trap-user'",
+            "set 01/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 02/type session",
+            "set 02/control required",
+            "set 02/module pam_namespace.so",
+            "set 02/argument[1] no_unmount_on_close",
+            "set 02/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 03/type session",
+            "set 03/control optional",
+            "set 03/module pam_cgroup.so",
+            "set 03/#comment 'Managed by puppet:openshift_origin'",
+          ],
+          onlyif => "match *[#comment='Managed by puppet:openshift_origin'] size == 0"
+      }
+    
+      augeas { 'openshift node pam su':
+        context => "/files/etc/pam.d/su",
+        changes => [
+            "set 01/type session",
+            "set 01/control '[default=1 success=ignore]'",
+            "set 01/module pam_succeed_if.so",
+            "set 01/argument[1] 'quiet shell = /usr/bin/oo-trap-user'",
+            "set 01/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 02/type session",
+            "set 02/control required",
+            "set 02/module pam_namespace.so",
+            "set 02/argument[1] no_unmount_on_close",
+            "set 02/#comment 'Managed by puppet:openshift_origin'",
+          ],
+          onlyif => "match *[#comment='Managed by puppet:openshift_origin'] size == 0"
+      }
+    
+      augeas { 'openshift node pam system-auth-ac':
+        context => "/files/etc/pam.d/system-auth-ac",
+        changes => [
+            "set 01/type session",
+            "set 01/control '[default=1 success=ignore]'",
+            "set 01/module pam_succeed_if.so",
+            "set 01/argument[1] 'quiet shell = /usr/bin/oo-trap-user'",
+            "set 01/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 02/type session",
+            "set 02/control required",
+            "set 02/module pam_namespace.so",
+            "set 02/argument[1] no_unmount_on_close",
+            "set 02/#comment 'Managed by puppet:openshift_origin'",
+
+            "set 03/type session",
+            "set 03/control optional",
+            "set 03/module pam_cgroup.so",
+            "set 03/#comment 'Managed by puppet:openshift_origin'",
+          ],
+          onlyif => "match *[#comment='Managed by puppet:openshift_origin'] size == 0"
+      }  
+    
+      $os_all_unmanaged_users = [['root', 'adm', 'apache'], $::openshift_origin::os_unmanaged_users]
+    
+      file { 'openshift node pam-namespace sandbox.conf':
+        ensure  => present,
+        path    => '/etc/security/namespace.d/sandbox.conf',
+        content => template('openshift_origin/node/namespace-d-sandbox.conf.erb'),
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0644',
+        require => Package['pam_openshift'],
+      }
+    
+      file { 'openshift node pam-namespace tmp.conf':
+        ensure  => present,
+        path    => '/etc/security/namespace.d/tmp.conf',
+        content => template('openshift_origin/node/namespace-d-tmp.conf.erb'),
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0644',
+        require => Package['pam_openshift'],
+      }
+    
+      file { 'openshift node pam-namespace vartmp.conf':
+        ensure  => present,
+        path    => '/etc/security/namespace.d/vartmp.conf',
+        content => template('openshift_origin/node/namespace-d-vartmp.conf.erb'),
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0644',
+        require => Package['pam_openshift'],
+      }
+    } else {
+      warning 'Please configure pam on all nodes.'
+    }
+  }
+
+   if $::openshift_origin::node_container == 'libvirt-lxc' {
+    ensure_resource('package', 'libvirt-daemon', {
+        ensure  => present,
+      }
+    )
+
+    ensure_resource('package', 'libvirt-sandbox', {
+        ensure  => present,
+      }
+    )
+
+    service { 'libvirtd':
+      enable  => true,
+      require => [Package['libvirt-daemon'], Package['libvirt-sandbox']]
+    }
   }
   
-  # Reload sysctl.conf to get the new settings.
-  #
-  # Note: We could add -e here to ignore errors that are caused by
-  # options appearing in sysctl.conf that correspond to kernel modules
-  # that are not yet loaded.  On the other hand, adding -e might cause
-  # us to miss some important error messages.
-  exec{ 'Reload sysctl':
-    command     => "${::openshift_origin::params::sysctl} -p /etc/sysctl.conf",
-    refreshonly => true,
-    require     => Class['openshift_origin::modprobe'],
+
+  file { 'sysctl config tweaks':
+    ensure  => present,
+    path    => '/etc/sysctl.conf',
+    content => template('openshift_origin/node/sysctl.conf.erb'),
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
   }
-  
-  case $::openshift_origin::node_container_plugin {
-    'selinux': { include openshift_origin::plugins::container::selinux }
-    'libvirt': { include openshift_origin::plugins::container::libvirt }
+
+  if $::openshift_origin::enable_network_services == true {
+    service { 'crond':
+      enable  => true,
+      require => Package['cronie']
+    }
+
+    service { 'oddjobd':
+      enable  => true,
+      require => Package['oddjob']
+    }
+
+    $openshift_init_provider = $::operatingsystem ? {
+      'Fedora' => 'systemd',
+      'CentOS' => 'redhat',
+      default  => 'redhat',
+    }
+
+    service { ['openshift-gears', 'openshift-node-web-proxy']:
+      require  => [
+        Package['rubygem-openshift-origin-node'],
+        Package['openshift-origin-node-util'],
+        Package['openshift-origin-node-proxy'],
+      ],
+      provider => $openshift_init_provider,
+      enable   => true,
+    }
+
+    service { 'mcollective':
+      require => [Package['mcollective']],
+      enable  => true,
+    }
+  } else {
+    warning 'Please ensure that mcollective, cron, openshift-gears, openshift-node-web-proxy, and oddjobd are running on all nodes'
   }
-  
-  if member( $::openshift_origin::node_frontend_plugins, 'apache-mod-rewrite' ) { include openshift_origin::plugins::frontend::apache_mod_rewrite }
-  if member( $::openshift_origin::node_frontend_plugins, 'nodejs-websocket' ) { include openshift_origin::plugins::frontend::nodejs_websocket }
-  
-  augeas { 'Tune sshd config':
-    context => "/files/etc/ssh/sshd_config",
-    changes => [
-      'set MaxSessions 40',
-      'set MaxStartups 40',
-      'set AcceptEnv[5]/01 GIT_SSH',
-    ],
-    onlyif => "match AcceptEnv[*]/*[. = 'GIT_SSH'] size == 0"
+
+  exec { 'Restoring SELinux contexts':
+    command => '/sbin/restorecon -rv /var/lib/openshift \
+          /var/lib/openshift/.httpd.d/',
+    require => [Package['rubygem-openshift-origin-node']],
   }
-  
-  service { [
-      'openshift-iptables-port-proxy',
-      'openshift-tc',
-      'sshd',
-      'oddjobd',
-      'messagebus',
-    ]:
-    enable  => true,
-    require => [
-      Package['rubygem-openshift-origin-node'],      
-      Package['openshift-origin-node-util'],
-      Package["mcollective"],
-      Package["oddjob"],
-    ],
+
+  if ($::openshift_origin::configure_broker == true and $::openshift_origin::configure_node == true) {
+    file { 'broker and console route for node':
+      ensure  => present,
+      path    => '/tmp/nodes.broker_routes.txt',
+      content => template('openshift_origin/node/node_routes.txt.erb'),
+      owner   => 'root',
+      group   => 'apache',
+      mode    => '0640',
+      require => Package['rubygem-openshift-origin-node'],
+    }
+
+    exec { 'regen node routes':
+      command => "${::openshift_origin::cat} /etc/httpd/conf.d/openshift/nodes.txt /tmp/nodes.broker_routes.txt > /etc/httpd/conf.d/openshift/nodes.txt.new && \
+                      ${::openshift_origin::mv} /etc/httpd/conf.d/openshift/nodes.txt.new /etc/httpd/conf.d/openshift/nodes.txt && \
+                      ${::openshift_origin::httxt2dbm} -f DB -i /etc/httpd/conf.d/openshift/nodes.txt -o /etc/httpd/conf.d/openshift/nodes.db.new && \
+                      ${::openshift_origin::chown} root:apache /etc/httpd/conf.d/openshift/nodes.txt /etc/httpd/conf.d/openshift/nodes.db.new && \
+                      ${::openshift_origin::chmod} 750 /etc/httpd/conf.d/openshift/nodes.txt /etc/httpd/conf.d/openshift/nodes.db.new && \
+                      ${::openshift_origin::mv} -f /etc/httpd/conf.d/openshift/nodes.db.new /etc/httpd/conf.d/openshift/nodes.db",
+      unless  => "${::openshift_origin::grep} '__default__/broker' /etc/httpd/conf.d/openshift/nodes.txt 2>/dev/null",
+      require => File['broker and console route for node'],
+    }
   }
-  
-  service { ['openshift-gears']:
-    enable  => true,
-    require => [
-      Package['rubygem-openshift-origin-node'],      
-      Package['openshift-origin-node-util'],
-    ],
-    provider => $::openshift_origin::params::os_init_provider,
+
+  if ($::openshift_origin::configure_node == true) {
+    if $::operatingsystem == "Fedora" {
+      file { 'allow cartridge files through apache':
+        ensure  => present,
+        path    => '/etc/httpd/conf.d/cartridge_files.conf',
+        content => template('openshift_origin/node/cartridge_files.conf.erb'),
+        owner   => 'root',
+        group   => 'root',
+        mode    => '0660',
+        require =>  Package['httpd'],
+      }
+    }
   }
-  
+
   file { 'create node setting markers dir':
     ensure  => 'directory',
     path    => '/var/lib/openshift/.settings',
@@ -152,26 +537,96 @@ class openshift_origin::node {
     group   => 'root',
     mode    => '0755'
   }
-  
-  firewall{ 'ssh':
-    service => 'ssh',
-  }
-  
-  firewall{ 'http':
-    service => 'http',
-  }
-  
-  firewall{ 'https':
-    service => 'https',
-  }
-  
-  firewall{ 'node-http':
-    port      => '8000',
-    protocol  => 'tcp',
+
+  file { 'create v2 cartridge marker':
+    ensure  => present,
+    path    => '/var/lib/openshift/.settings/v2_cartridge_format',
+    content => '',
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => File['create node setting markers dir']
   }
 
-  firewall{ 'node-https':
-    port      => '8443',
-    protocol  => 'tcp',
+  package { 'yum-plugin-versionlock':
+    ensure  => latest,
+  }
+
+  package { [
+    'openshift-origin-cartridge-cron',
+    'openshift-origin-cartridge-diy',
+    'openshift-origin-cartridge-haproxy',
+    'openshift-origin-cartridge-jenkins',
+    'openshift-origin-cartridge-jenkins-client',
+    'openshift-origin-cartridge-perl',
+    'openshift-origin-cartridge-php',
+    'openshift-origin-cartridge-postgresql',
+    'openshift-origin-cartridge-python',
+    'openshift-origin-cartridge-ruby',
+  ]:
+    ensure  => present,
+    notify => Exec['oo-admin-cartridge'],
+  }
+
+  case $::operatingsystem {
+    'Fedora' : {
+        package { [
+          'openshift-origin-cartridge-mariadb',
+        ]:
+        ensure  => present,
+        require => [
+        ],
+      }
+    }
+    default  : {
+      package { [
+          'openshift-origin-cartridge-mysql',
+        ]:
+        ensure  => present,
+        require => [
+        ],
+      }
+    }
+  }
+
+  if( $::openshift_origin::development_mode == true ) {
+    package { [
+      'openshift-origin-cartridge-mock',
+      'openshift-origin-cartridge-mock-plugin',
+    ]:
+      ensure  => present,
+      require => [
+      ],
+      notify => Exec['oo-admin-cartridge'],
+    }
+  }
+  
+  # Note, this does not handle cartridge uninstalls
+  exec { 'oo-admin-cartridge':
+    command => '/usr/sbin/oo-admin-cartridge --recursive -a install -s /usr/libexec/openshift/cartridges/v2/',
+    refreshonly => true,
+    notify => Exec['openshift-facts'],
+  }
+
+  exec { 'openshift-facts':
+    command     => '/usr/bin/oo-exec-ruby /usr/libexec/mcollective/update_yaml.rb /etc/mcollective/facts.yaml',
+    environment => ['LANG=en_US.UTF-8', 'LC_ALL=en_US.UTF-8'],
+    require     => [
+      Package['openshift-origin-msg-node-mcollective'],
+      Package['mcollective'],
+    ],
+    refreshonly => true,
+  }
+
+  if( $::operatingsystem == 'Fedora' ) {
+    file { '/usr/lib/systemd/system/mcollective.service':
+      content => template('openshift_origin/node/mcollective.service.erb'),
+      notify  => Exec['systemd-daemon-reload']
+    }
+  }
+
+  exec { 'systemd-daemon-reload':
+    command     => '/bin/systemctl --system daemon-reload',
+    refreshonly => true,
   }
 }

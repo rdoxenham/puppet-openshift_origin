@@ -1,31 +1,87 @@
+# == Class: openshift_origin::mongo
+#
+# Manage MongoDB for OpenShift Origin.
+#
+# === Parameters
+#
+# None
+#
+# === Examples
+#
+#  include openshift_origin::mongo
+#
+# === Copyright
+#
 # Copyright 2013 Mojo Lingo LLC.
-# Modifications by Red Hat, Inc.
-# 
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-# 
-#      http://www.apache.org/licenses/LICENSE-2.0
-# 
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Copyright 2013 Red Hat, Inc.
+#
+# === License
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
 class openshift_origin::mongo {
-  ensure_resource('package', ['mongodb', 'mongodb-server'], {
+  include openshift_origin::params
+  ensure_resource('package', 'mongodb', {
       ensure  => present,
-      require => Class['openshift_origin::install_method'],
+    }
+  )
+  ensure_resource('package', 'mongodb-server', {
+      ensure  => present,
+    }
+  )
+  ensure_resource('package', 'rubygem-open4', {
+      ensure  => present,
+    }
+  )
+  ensure_resource('package', 'ruby193-rubygem-open4', {
+      ensure  => present,
     }
   )
 
+  file { 'Temporarily Disable mongo auth':
+    ensure  => present,
+    path    => '/etc/mongodb.conf',
+    content => template('openshift_origin/mongodb/mongodb.conf.erb'),
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => [
+      Package['mongodb'],
+      Package['mongodb-server'],
+    ],
+  }
+  
   file { 'mongo setup script':
     ensure  => present,
     path    => '/usr/sbin/oo-mongo-setup',
     content => template('openshift_origin/mongodb/oo-mongo-setup'),
     owner   => 'root',
     group   => 'root',
+    mode    => '0700',
+    require => [
+      Package['mongodb'],
+      Package['mongodb-server'],
+      Package['rubygem-open4'],
+      Package['ruby193-rubygem-open4'],
+    ],
+  }
+
+  file { 'mongo keyfile':
+    ensure  => present,
+    path    => '/etc/mongodb.keyfile',
+    content => template('openshift_origin/mongodb/mongodb.keyfile.erb'),
+    owner   => 'mongodb',
+    group   => 'mongodb',
     mode    => '0700',
     require => [
       Package['mongodb'],
@@ -65,19 +121,31 @@ class openshift_origin::mongo {
       enable   => true,
     }
   } else {
-    $cmd = $::operatingsystem ? {
-      'Fedora' => '/usr/sbin/oo-mongo-setup',
-      default => '/usr/bin/scl enable ruby193 /usr/sbin/oo-mongo-setup',
-    }
-
     exec { '/usr/sbin/oo-mongo-setup':
-      command => $cmd,
       require => File['mongo setup script']
     }
   }
 
-  service { 'mongod':
-    require   => [Package['mongodb'], Package['mongodb-server']],
-    enable    => true,
+  if $::openshift_origin::enable_network_services == true {
+    service { 'mongod':
+      require   => [Package['mongodb'], Package['mongodb-server']],
+      enable    => true,
+    }
+  }
+
+  if $::openshift_origin::configure_firewall == true {
+    $mongo_port = $::use_firewalld ? {
+      'true'  => '27017/tcp',
+      default => '27017:tcp',
+    }
+
+    exec { 'Open port for MongoDB':
+      command => "${openshift_origin::params::firewall_port_cmd}${mongo_port}",
+      require => [
+        Package['mongodb'],
+        Package['mongodb-server'],
+        Package['firewall-package'],
+      ],
+    }
   }
 }
