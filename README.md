@@ -14,7 +14,7 @@ services including ActiveMQ, Qpid, MongoDB, named and OS settings including fire
 * Ben Klang
 * Ben Langfeld
 * Krishna Raman
-# Rhys Oxenham
+* Rhys Oxenham
 
 # Requirements
 
